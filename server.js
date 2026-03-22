@@ -2,32 +2,76 @@ const express = require("express");
 const https = require("https");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.static("public"));
 
-// --- Persistent HTTPS agent for connection reuse (like a real browser) ---
+// --- Persistent HTTPS agent for connection reuse ---
 const agent = new https.Agent({
   keepAlive: true,
   maxSockets: 5,
   timeout: 20000,
 });
 
-// --- Session state ---
+// --- Session state (NSE direct) ---
 let sessionCookies = "";
 let lastCookieRefresh = 0;
-const COOKIE_TTL = 2 * 60 * 1000; // refresh cookies every 2 min
+const COOKIE_TTL = 2 * 60 * 1000;
 
-// --- Response cache so frontend always has data ---
-const cache = {}; // { index: { data, timestamp } }
-const CACHE_TTL = 15 * 1000; // 15 seconds
+// --- Response cache ---
+const cache = {};
+const CACHE_TTL = 15 * 1000;
+
+// --- Track which source works ---
+let nseDirectWorks = true; // optimistic, will flip on failure
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+// ── Index → Yahoo Finance ticker mappings ──
+const INDEX_YAHOO_SYMBOLS = {
+  "NIFTY 50": [
+    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS",
+    "HINDUNILVR.NS","BHARTIARTL.NS","SBIN.NS","BAJFINANCE.NS","ITC.NS",
+    "KOTAKBANK.NS","LT.NS","HCLTECH.NS","AXISBANK.NS","ASIANPAINT.NS",
+    "MARUTI.NS","SUNPHARMA.NS","TITAN.NS","ULTRACEMCO.NS","WIPRO.NS",
+    "NESTLEIND.NS","BAJAJFINSV.NS","TATAMOTORS.NS","NTPC.NS","POWERGRID.NS",
+    "M&M.NS","TATASTEEL.NS","ONGC.NS","JSWSTEEL.NS","ADANIPORTS.NS",
+    "COALINDIA.NS","TECHM.NS","HDFCLIFE.NS","CIPLA.NS","DRREDDY.NS",
+    "GRASIM.NS","DIVISLAB.NS","BPCL.NS","HEROMOTOCO.NS","INDUSINDBK.NS",
+    "SBILIFE.NS","BRITANNIA.NS","EICHERMOT.NS","HINDALCO.NS","APOLLOHOSP.NS",
+    "TATACONSUM.NS","BAJAJ-AUTO.NS","SHRIRAMFIN.NS","BEL.NS","TRENT.NS"
+  ],
+  "NIFTY BANK": [
+    "HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","KOTAKBANK.NS","AXISBANK.NS",
+    "INDUSINDBK.NS","BANKBARODA.NS","PNB.NS","FEDERALBNK.NS","IDFCFIRSTB.NS",
+    "BANDHANBNK.NS","AUBANK.NS"
+  ],
+  "NIFTY IT": [
+    "TCS.NS","INFY.NS","HCLTECH.NS","WIPRO.NS","TECHM.NS",
+    "LTIM.NS","PERSISTENT.NS","COFORGE.NS","MPHASIS.NS","LTTS.NS"
+  ],
+  "NIFTY AUTO": [
+    "TATAMOTORS.NS","M&M.NS","MARUTI.NS","BAJAJ-AUTO.NS","HEROMOTOCO.NS",
+    "EICHERMOT.NS","ASHOKLEY.NS","BALKRISIND.NS","BHARATFORG.NS","BOSCHLTD.NS",
+    "MOTHERSON.NS","TVSMOTOR.NS","MRF.NS","EXIDEIND.NS","TIINDIA.NS"
+  ],
+  "NIFTY PHARMA": [
+    "SUNPHARMA.NS","DRREDDY.NS","CIPLA.NS","DIVISLAB.NS","APOLLOHOSP.NS",
+    "LUPIN.NS","AUROPHARMA.NS","TORNTPHARM.NS","ALKEM.NS","BIOCON.NS",
+    "IPCALAB.NS","GLENMARK.NS","ABBOTINDIA.NS","LAURUSLABS.NS","ZYDUSLIFE.NS"
+  ],
+  "NIFTY MIDCAP 50": [
+    "POLYCAB.NS","PIIND.NS","MUTHOOTFIN.NS","ASTRAL.NS","VOLTAS.NS",
+    "JUBLFOOD.NS","AUROPHARMA.NS","PAGEIND.NS","OBEROI.NS","LICHSGFIN.NS",
+    "CUMMINSIND.NS","MFSL.NS","ESCORTS.NS","ATUL.NS","COROMANDEL.NS",
+    "IDFCFIRSTB.NS","NAVINFLUOR.NS","PETRONET.NS","PRESTIGE.NS","PEL.NS"
+  ],
+};
+
 function httpsGet(url, headers = {}, redirectCount = 0) {
   return new Promise((resolve, reject) => {
-    if (redirectCount > 3) return reject(new Error("Too many redirects"));
+    if (redirectCount > 5) return reject(new Error("Too many redirects"));
     const parsed = new URL(url);
     const options = {
       hostname: parsed.hostname,
@@ -58,12 +102,10 @@ function httpsGet(url, headers = {}, redirectCount = 0) {
     };
 
     const req = https.request(options, (res) => {
-      // Follow redirects
       if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
         const loc = res.headers.location.startsWith("http")
           ? res.headers.location
           : `https://${parsed.hostname}${res.headers.location}`;
-        // Consume body
         res.resume();
         return httpsGet(loc, headers, redirectCount + 1).then(resolve, reject);
       }
@@ -88,6 +130,10 @@ function httpsGet(url, headers = {}, redirectCount = 0) {
   });
 }
 
+// ══════════════════════════════════════════
+// SOURCE 1: NSE Direct
+// ══════════════════════════════════════════
+
 function parseCookies(res) {
   const setCookies = res.headers["set-cookie"];
   if (!setCookies || setCookies.length === 0) return null;
@@ -98,7 +144,6 @@ async function refreshCookies(force = false) {
   const now = Date.now();
   if (!force && now - lastCookieRefresh < COOKIE_TTL && sessionCookies) return true;
 
-  // Try multiple endpoints — NSE sometimes blocks one but not another
   const endpoints = [
     "https://www.nseindia.com/",
     "https://www.nseindia.com/market-data/live-equity-market",
@@ -115,14 +160,10 @@ async function refreshCookies(force = false) {
         console.log(`[NSE] Cookies refreshed from ${url} (status ${res.status})`);
         return true;
       }
-      // Sometimes Akamai returns 403 but still sets cookies — already handled above
-      console.log(`[NSE] No cookies from ${url} (status ${res.status})`);
     } catch (err) {
       console.log(`[NSE] Failed ${url}: ${err.message}`);
     }
   }
-
-  console.error("[NSE] All cookie endpoints failed");
   return false;
 }
 
@@ -142,7 +183,6 @@ async function fetchFromNSE(index) {
   if (response.status === 401 || response.status === 403) {
     throw new Error(`AUTH_FAIL_${response.status}`);
   }
-
   if (response.status !== 200) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -150,70 +190,218 @@ async function fetchFromNSE(index) {
   return JSON.parse(response.body);
 }
 
-// --- API proxy with retry + cache fallback ---
+async function tryNSEDirect(index) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const gotCookies = await refreshCookies(attempt > 1);
+      if (!gotCookies) continue;
+
+      if (attempt > 1) await new Promise((r) => setTimeout(r, 500));
+      const result = await fetchFromNSE(index);
+      nseDirectWorks = true;
+      return result;
+    } catch (err) {
+      console.error(`[NSE Direct] Attempt ${attempt}/2 failed: ${err.message}`);
+      if (err.message.startsWith("AUTH_FAIL")) {
+        sessionCookies = "";
+        lastCookieRefresh = 0;
+      }
+    }
+  }
+  nseDirectWorks = false;
+  return null;
+}
+
+// ══════════════════════════════════════════
+// SOURCE 2: Yahoo Finance (fallback)
+// ══════════════════════════════════════════
+
+async function fetchFromYahoo(index) {
+  const symbols = INDEX_YAHOO_SYMBOLS[index];
+  if (!symbols) throw new Error(`No Yahoo mapping for index: ${index}`);
+
+  // Yahoo Finance API — fetch quotes for all symbols in one call
+  const symbolList = symbols.join(",");
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolList)}&fields=symbol,shortName,regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketPreviousClose,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow`;
+
+  const response = await httpsGet(url, {
+    Accept: "application/json",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Yahoo API returned ${response.status}`);
+  }
+
+  const json = JSON.parse(response.body);
+  const quotes = json.quoteResponse?.result;
+  if (!quotes || quotes.length === 0) {
+    throw new Error("No data from Yahoo Finance");
+  }
+
+  // Transform Yahoo data to match NSE format so frontend works unchanged
+  const data = quotes.map((q) => ({
+    symbol: q.symbol.replace(".NS", ""),
+    lastPrice: q.regularMarketPrice,
+    change: q.regularMarketChange,
+    pChange: q.regularMarketChangePercent,
+    previousClose: q.regularMarketPreviousClose,
+    open: q.regularMarketOpen,
+    dayHigh: q.regularMarketDayHigh,
+    dayLow: q.regularMarketDayLow,
+    totalTradedVolume: q.regularMarketVolume,
+    meta: { companyName: q.shortName },
+  }));
+
+  console.log(`[Yahoo] Fetched ${data.length} stocks for ${index}`);
+  return { name: index, data, _source: "yahoo" };
+}
+
+// ══════════════════════════════════════════
+// SOURCE 3: Google Finance scrape (last resort)
+// ══════════════════════════════════════════
+
+const INDEX_GOOGLE_SYMBOLS = {
+  "NIFTY 50": [
+    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","BHARTIARTL",
+    "SBIN","BAJFINANCE","ITC","KOTAKBANK","LT","HCLTECH","AXISBANK",
+    "ASIANPAINT","MARUTI","SUNPHARMA","TITAN","WIPRO","TATAMOTORS",
+    "NTPC","POWERGRID","M&M","TATASTEEL","ONGC","JSWSTEEL","ADANIPORTS",
+    "COALINDIA","TECHM","CIPLA","DRREDDY","HINDALCO","BAJAJ-AUTO","BEL","TRENT"
+  ],
+  "NIFTY BANK": [
+    "HDFCBANK","ICICIBANK","SBIN","KOTAKBANK","AXISBANK","INDUSINDBK",
+    "BANKBARODA","PNB","FEDERALBNK","IDFCFIRSTB","BANDHANBNK","AUBANK"
+  ],
+  "NIFTY IT": [
+    "TCS","INFY","HCLTECH","WIPRO","TECHM","LTIM","PERSISTENT","COFORGE","MPHASIS","LTTS"
+  ],
+  "NIFTY AUTO": [
+    "TATAMOTORS","M&M","MARUTI","BAJAJ-AUTO","HEROMOTOCO","EICHERMOT",
+    "ASHOKLEY","TVSMOTOR","MRF","MOTHERSON"
+  ],
+  "NIFTY PHARMA": [
+    "SUNPHARMA","DRREDDY","CIPLA","DIVISLAB","APOLLOHOSP","LUPIN",
+    "AUROPHARMA","TORNTPHARM","ALKEM","BIOCON"
+  ],
+  "NIFTY MIDCAP 50": [
+    "POLYCAB","PIIND","MUTHOOTFIN","ASTRAL","VOLTAS","JUBLFOOD",
+    "AUROPHARMA","PAGEIND","CUMMINSIND","ESCORTS"
+  ],
+};
+
+async function fetchSingleGoogle(symbol) {
+  const url = `https://www.google.com/finance/quote/${encodeURIComponent(symbol)}:NSE`;
+  try {
+    const res = await httpsGet(url, { Accept: "text/html" });
+    if (res.status !== 200) return null;
+    const html = res.body;
+
+    // Extract price from data attributes / structured text
+    const priceMatch = html.match(/data-last-price="([^"]+)"/);
+    const changeMatch = html.match(/data-last-normal-market-change="([^"]+)"/);  // not always present
+    const pctMatch = html.match(/data-last-normal-market-change-percent="([^"]+)"/);  // not always present
+    const prevMatch = html.match(/data-previous-close="([^"]+)"/);
+
+    if (!priceMatch) return null;
+
+    const lastPrice = parseFloat(priceMatch[1]);
+    const previousClose = prevMatch ? parseFloat(prevMatch[1]) : lastPrice;
+    const change = changeMatch ? parseFloat(changeMatch[1]) : lastPrice - previousClose;
+    const pChange = pctMatch ? parseFloat(pctMatch[1]) : previousClose ? ((change / previousClose) * 100) : 0;
+
+    return {
+      symbol,
+      lastPrice,
+      change,
+      pChange,
+      previousClose,
+      totalTradedVolume: 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchFromGoogle(index) {
+  const symbols = INDEX_GOOGLE_SYMBOLS[index] || INDEX_GOOGLE_SYMBOLS["NIFTY 50"];
+  // Fetch in batches of 5 to avoid rate limiting
+  const results = [];
+  for (let i = 0; i < symbols.length; i += 5) {
+    const batch = symbols.slice(i, i + 5);
+    const batchResults = await Promise.all(batch.map(fetchSingleGoogle));
+    results.push(...batchResults.filter(Boolean));
+    if (i + 5 < symbols.length) await new Promise((r) => setTimeout(r, 200));
+  }
+
+  if (results.length === 0) throw new Error("Google Finance returned no data");
+  console.log(`[Google] Fetched ${results.length} stocks for ${index}`);
+  return { name: index, data: results, _source: "google" };
+}
+
+// ══════════════════════════════════════════
+// API ENDPOINT — tries sources in order
+// ══════════════════════════════════════════
+
 app.get("/api/gainers-losers", async (req, res) => {
   const index = req.query.index || "NIFTY 50";
 
-  // Return cache if fresh enough
+  // Return cache if fresh
   const cached = cache[index];
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return res.json(cached.data);
   }
 
-  // Attempt up to 3 tries with cookie refresh on auth failures
-  let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      // Refresh cookies if needed
-      const gotCookies = await refreshCookies(attempt > 1);
-      if (!gotCookies) {
-        lastErr = new Error("Could not get NSE session cookies");
-        continue;
-      }
-
-      const data = fetchFromNSE(index);
-      // Small delay between cookie fetch and API call for first attempt
-      if (attempt === 1) {
-        const result = await data;
-        // Cache the successful result
-        cache[index] = { data: result, timestamp: Date.now() };
-        return res.json(result);
-      } else {
-        // On retry, add a small delay
-        await new Promise((r) => setTimeout(r, 1000));
-        const result = await data;
-        cache[index] = { data: result, timestamp: Date.now() };
-        return res.json(result);
-      }
-    } catch (err) {
-      lastErr = err;
-      console.error(`[NSE] Attempt ${attempt}/3 failed for ${index}: ${err.message}`);
-
-      if (err.message.startsWith("AUTH_FAIL")) {
-        // Force cookie refresh on next attempt
-        sessionCookies = "";
-        lastCookieRefresh = 0;
-        // Wait before retry
-        await new Promise((r) => setTimeout(r, 500 * attempt));
-      }
+  // Source 1: NSE Direct (skip if it already failed recently)
+  if (nseDirectWorks) {
+    const nseData = await tryNSEDirect(index);
+    if (nseData) {
+      nseData._source = "nse";
+      cache[index] = { data: nseData, timestamp: Date.now() };
+      return res.json(nseData);
     }
   }
 
-  // All retries failed — return stale cache if available
+  // Source 2: Yahoo Finance
+  try {
+    console.log(`[Fallback] Trying Yahoo Finance for ${index}...`);
+    const yahooData = await fetchFromYahoo(index);
+    cache[index] = { data: yahooData, timestamp: Date.now() };
+    return res.json(yahooData);
+  } catch (err) {
+    console.error(`[Yahoo] Failed: ${err.message}`);
+  }
+
+  // Source 3: Google Finance (slowest, last resort)
+  try {
+    console.log(`[Fallback] Trying Google Finance for ${index}...`);
+    const googleData = await fetchFromGoogle(index);
+    cache[index] = { data: googleData, timestamp: Date.now() };
+    return res.json(googleData);
+  } catch (err) {
+    console.error(`[Google] Failed: ${err.message}`);
+  }
+
+  // All sources failed — return stale cache if available
   if (cached) {
-    console.log(`[NSE] Returning stale cache for ${index}`);
+    console.log(`[Cache] Returning stale data for ${index}`);
     return res.json({ ...cached.data, _stale: true });
   }
 
   res.status(502).json({
-    error: `Failed to fetch data from NSE after 3 attempts. ${lastErr?.message || ""}`,
+    error: "All data sources failed (NSE, Yahoo, Google). Please try again.",
   });
 });
 
-// Pre-warm cookies on startup
+// Pre-warm
 refreshCookies().then((ok) => {
   if (ok) console.log("[NSE] Initial cookie warmup done");
-  else console.log("[NSE] Initial cookie warmup failed — will retry on first request");
+  else {
+    console.log("[NSE] Direct access blocked — will use Yahoo/Google fallback");
+    nseDirectWorks = false;
+  }
 });
 
 app.listen(PORT, () => {

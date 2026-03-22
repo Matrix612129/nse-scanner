@@ -161,7 +161,7 @@ tr.flash-lose{animation:flash-red .8s ease-out}
   <span class="dot ok" id="connDot"></span>
   <span id="connLabel">CONNECTED</span>
   <div class="spacer"></div>
-  <span>DATA SOURCE: NSE INDIA</span>
+  <span>SOURCE: <span id="dataSource">NSE INDIA</span></span>
 </div>
 
 <script>
@@ -254,7 +254,10 @@ async function fetchData() {
     if (json.error) throw new Error(json.error);
     if (!json.data || !json.data.length) throw new Error("No data received");
 
-    // Show stale indicator if data is from cache
+    // Show data source and stale indicator
+    const src = json._source || "nse";
+    const srcLabel = { nse: "NSE DIRECT", yahoo: "YAHOO FINANCE", google: "GOOGLE FINANCE" };
+    $("dataSource").textContent = srcLabel[src] || src.toUpperCase();
     if (json._stale) {
       $("lastUpdated").textContent += " (cached)";
     }
