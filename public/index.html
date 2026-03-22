@@ -267,8 +267,19 @@ async function fetchData() {
 
     // Sort for gainers (desc) and losers (asc)
     const sorted = [...stocks].sort((a, b) => b.pChange - a.pChange);
-    const gainers = sorted.filter(s => s.pChange >= 0).slice(0, 10);
-    const losers = [...stocks].sort((a, b) => a.pChange - b.pChange).filter(s => s.pChange < 0).slice(0, 10);
+    const hasNegative = stocks.some(s => s.pChange < 0);
+    const hasPositive = stocks.some(s => s.pChange > 0);
+
+    let gainers, losers;
+    if (hasPositive && hasNegative) {
+      // Normal market: split by sign
+      gainers = sorted.filter(s => s.pChange >= 0).slice(0, 10);
+      losers = [...stocks].sort((a, b) => a.pChange - b.pChange).filter(s => s.pChange < 0).slice(0, 10);
+    } else {
+      // Market closed or all same direction: show top 10 and bottom 10
+      gainers = sorted.slice(0, 10);
+      losers = [...stocks].sort((a, b) => a.pChange - b.pChange).slice(0, 10);
+    }
 
     const allVols = stocks.map(s => s.totalTradedVolume || 0);
     const maxVol = Math.max(...allVols, 1);

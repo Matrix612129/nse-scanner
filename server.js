@@ -216,47 +216,91 @@ async function tryNSEDirect(index) {
 // SOURCE 2: Yahoo Finance (fallback)
 // ══════════════════════════════════════════
 
+let yahooCrumb = "";
+let yahooCookies = "";
+
+async function getYahooCrumb() {
+  if (yahooCrumb && yahooCookies) return true;
+  try {
+    // Step 1: Get cookies from Yahoo Finance
+    const page = await httpsGet("https://finance.yahoo.com/quote/RELIANCE.NS/", {
+      Accept: "text/html",
+    });
+    const cookies = parseCookies(page);
+    if (cookies) yahooCookies = cookies;
+
+    // Step 2: Get crumb
+    const crumbRes = await httpsGet("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+      Accept: "text/plain",
+      Cookie: yahooCookies,
+    });
+    if (crumbRes.status === 200 && crumbRes.body && crumbRes.body.length < 50) {
+      yahooCrumb = crumbRes.body.trim();
+      console.log("[Yahoo] Got crumb:", yahooCrumb);
+      return true;
+    }
+  } catch (err) {
+    console.error("[Yahoo] Crumb fetch failed:", err.message);
+  }
+  return false;
+}
+
 async function fetchFromYahoo(index) {
   const symbols = INDEX_YAHOO_SYMBOLS[index];
   if (!symbols) throw new Error(`No Yahoo mapping for index: ${index}`);
 
-  // Yahoo Finance API — fetch quotes for all symbols in one call
+  // Try with crumb first
+  const hasCrumb = await getYahooCrumb();
+
   const symbolList = symbols.join(",");
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolList)}&fields=symbol,shortName,regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketPreviousClose,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow`;
 
-  const response = await httpsGet(url, {
-    Accept: "application/json",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "cross-site",
-  });
+  // Try v7 with crumb, then v6, then without crumb
+  const urls = [];
+  if (hasCrumb) {
+    urls.push(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolList)}&crumb=${encodeURIComponent(yahooCrumb)}`);
+  }
+  urls.push(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolList)}`);
+  urls.push(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolList)}`);
 
-  if (response.status !== 200) {
-    throw new Error(`Yahoo API returned ${response.status}`);
+  let lastStatus = 0;
+  for (const url of urls) {
+    try {
+      const response = await httpsGet(url, {
+        Accept: "application/json",
+        Cookie: yahooCookies || "",
+      });
+      lastStatus = response.status;
+
+      if (response.status !== 200) continue;
+
+      const json = JSON.parse(response.body);
+      const quotes = json.quoteResponse?.result;
+      if (!quotes || quotes.length === 0) continue;
+
+      const data = quotes.map((q) => ({
+        symbol: q.symbol.replace(".NS", ""),
+        lastPrice: q.regularMarketPrice,
+        change: q.regularMarketChange,
+        pChange: q.regularMarketChangePercent,
+        previousClose: q.regularMarketPreviousClose,
+        open: q.regularMarketOpen,
+        dayHigh: q.regularMarketDayHigh,
+        dayLow: q.regularMarketDayLow,
+        totalTradedVolume: q.regularMarketVolume,
+        meta: { companyName: q.shortName },
+      }));
+
+      console.log(`[Yahoo] Fetched ${data.length} stocks for ${index}`);
+      return { name: index, data, _source: "yahoo" };
+    } catch (err) {
+      console.log(`[Yahoo] URL failed: ${err.message}`);
+    }
   }
 
-  const json = JSON.parse(response.body);
-  const quotes = json.quoteResponse?.result;
-  if (!quotes || quotes.length === 0) {
-    throw new Error("No data from Yahoo Finance");
-  }
-
-  // Transform Yahoo data to match NSE format so frontend works unchanged
-  const data = quotes.map((q) => ({
-    symbol: q.symbol.replace(".NS", ""),
-    lastPrice: q.regularMarketPrice,
-    change: q.regularMarketChange,
-    pChange: q.regularMarketChangePercent,
-    previousClose: q.regularMarketPreviousClose,
-    open: q.regularMarketOpen,
-    dayHigh: q.regularMarketDayHigh,
-    dayLow: q.regularMarketDayLow,
-    totalTradedVolume: q.regularMarketVolume,
-    meta: { companyName: q.shortName },
-  }));
-
-  console.log(`[Yahoo] Fetched ${data.length} stocks for ${index}`);
-  return { name: index, data, _source: "yahoo" };
+  // Reset crumb on failure
+  yahooCrumb = "";
+  yahooCookies = "";
+  throw new Error(`Yahoo Finance failed (last status: ${lastStatus})`);
 }
 
 // ══════════════════════════════════════════
@@ -299,24 +343,30 @@ async function fetchSingleGoogle(symbol) {
     if (res.status !== 200) return null;
     const html = res.body;
 
-    // Extract price from data attributes / structured text
+    // Extract current price
     const priceMatch = html.match(/data-last-price="([^"]+)"/);
-    const changeMatch = html.match(/data-last-normal-market-change="([^"]+)"/);  // not always present
-    const pctMatch = html.match(/data-last-normal-market-change-percent="([^"]+)"/);  // not always present
-    const prevMatch = html.match(/data-previous-close="([^"]+)"/);
-
     if (!priceMatch) return null;
-
     const lastPrice = parseFloat(priceMatch[1]);
-    const previousClose = prevMatch ? parseFloat(prevMatch[1]) : lastPrice;
-    const change = changeMatch ? parseFloat(changeMatch[1]) : lastPrice - previousClose;
-    const pChange = pctMatch ? parseFloat(pctMatch[1]) : previousClose ? ((change / previousClose) * 100) : 0;
+
+    // Extract previous close from "Previous close" section: ₹1,384.80
+    let previousClose = lastPrice;
+    const prevIdx = html.indexOf("Previous close");
+    if (prevIdx > -1) {
+      const snippet = html.substring(prevIdx, prevIdx + 300);
+      const prevMatch = snippet.match(/₹([\d,]+\.?\d*)/);
+      if (prevMatch) {
+        previousClose = parseFloat(prevMatch[1].replace(/,/g, ""));
+      }
+    }
+
+    const change = lastPrice - previousClose;
+    const pChange = previousClose ? (change / previousClose) * 100 : 0;
 
     return {
       symbol,
       lastPrice,
-      change,
-      pChange,
+      change: Math.round(change * 100) / 100,
+      pChange: Math.round(pChange * 100) / 100,
       previousClose,
       totalTradedVolume: 0,
     };
