@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NSE Live Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@400;600;700&family=Barlow+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--bg2:#0e0e16;--bg3:#13131e;--border:#1a1a2e;
+  --text:#c8c8d4;--text-dim:#6a6a7a;--text-bright:#eaeaf0;
+  --green:#00e676;--green-dim:#00c853;--green-glow:rgba(0,230,118,.15);
+  --red:#ff1744;--red-dim:#d50000;--red-glow:rgba(255,23,68,.15);
+  --accent:#7c4dff;--yellow:#ffd600;
+}
+html{font-size:13px}
+body{background:var(--bg);color:var(--text);font-family:'Barlow Condensed','Arial Narrow',sans-serif;min-height:100vh;overflow-x:hidden}
+
+/* ── TOP BAR ── */
+.topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:6px 16px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:100}
+.topbar .brand{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;letter-spacing:2px;color:var(--text-bright);white-space:nowrap}
+.topbar .brand span{color:var(--green)}
+.market-badge{padding:3px 10px;border-radius:3px;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;font-family:'JetBrains Mono',monospace}
+.market-badge.open{background:rgba(0,230,118,.12);color:var(--green);border:1px solid rgba(0,230,118,.3)}
+.market-badge.closed{background:rgba(255,23,68,.1);color:var(--red);border:1px solid rgba(255,23,68,.25)}
+.clock{font-family:'JetBrains Mono',monospace;font-size:.85rem;color:var(--text-dim);white-space:nowrap}
+.spacer{flex:1}
+.last-updated{font-size:.7rem;color:var(--text-dim);font-family:'JetBrains Mono',monospace;white-space:nowrap}
+
+/* ── PROGRESS BAR ── */
+.progress-wrap{height:3px;background:var(--bg3);width:100%;position:sticky;top:40px;z-index:99}
+.progress-bar{height:100%;background:linear-gradient(90deg,var(--green),var(--accent));width:100%;transition:width .3s linear;border-radius:0 2px 2px 0}
+
+/* ── CONTROLS ── */
+.controls{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.controls label{font-size:.8rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:600}
+.controls select{background:var(--bg3);color:var(--text-bright);border:1px solid var(--border);padding:5px 10px;font-family:'JetBrains Mono',monospace;font-size:.8rem;border-radius:3px;cursor:pointer;outline:none}
+.controls select:focus{border-color:var(--accent)}
+.btn{background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:5px 14px;font-family:'Barlow Condensed',sans-serif;font-size:.85rem;font-weight:600;text-transform:uppercase;letter-spacing:1px;cursor:pointer;border-radius:3px;transition:all .15s}
+.btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn:active{transform:scale(.97)}
+.countdown{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--text-dim)}
+
+/* ── GRID ── */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:0;min-height:calc(100vh - 100px)}
+.panel{border-right:1px solid var(--border);display:flex;flex-direction:column}
+.panel:last-child{border-right:none}
+.panel-header{padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;position:sticky;top:43px;z-index:50}
+.panel-header h2{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:2px}
+.panel-header .count{font-family:'JetBrains Mono',monospace;font-size:.7rem;padding:2px 6px;border-radius:2px}
+.panel.gainers .panel-header h2{color:var(--green)}
+.panel.gainers .count{background:var(--green-glow);color:var(--green)}
+.panel.losers .panel-header h2{color:var(--red)}
+.panel.losers .count{background:var(--red-glow);color:var(--red)}
+
+/* ── TABLE ── */
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+thead{position:sticky;top:83px;z-index:40}
+th{background:var(--bg3);padding:6px 10px;text-align:right;font-size:.65rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-dim);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+th:first-child{text-align:center;width:36px}
+th:nth-child(2){text-align:left}
+td{padding:7px 10px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:.82rem;border-bottom:1px solid rgba(26,26,46,.6);white-space:nowrap}
+td:first-child{text-align:center;color:var(--text-dim);font-size:.7rem}
+td:nth-child(2){text-align:left;font-family:'Barlow Condensed',sans-serif;font-weight:600;font-size:.9rem;letter-spacing:.5px}
+tbody tr{transition:background .2s}
+tbody tr:hover{background:rgba(124,77,255,.06)}
+
+.panel.gainers td:nth-child(4),
+.panel.gainers td:nth-child(5){color:var(--green)}
+.panel.losers td:nth-child(4),
+.panel.losers td:nth-child(5){color:var(--red)}
+
+/* Flash animation */
+@keyframes flash-green{0%{background:rgba(0,230,118,.18)}100%{background:transparent}}
+@keyframes flash-red{0%{background:rgba(255,23,68,.18)}100%{background:transparent}}
+tr.flash-gain{animation:flash-green .8s ease-out}
+tr.flash-lose{animation:flash-red .8s ease-out}
+
+/* Volume bar */
+.vol-cell{position:relative}
+.vol-bar{position:absolute;left:0;top:0;bottom:0;opacity:.08;border-radius:2px}
+.panel.gainers .vol-bar{background:var(--green)}
+.panel.losers .vol-bar{background:var(--red)}
+
+/* ── LOADING / ERROR ── */
+.status-msg{display:flex;align-items:center;justify-content:center;padding:60px 20px;color:var(--text-dim);font-size:1rem;flex:1}
+.status-msg.error{color:var(--red)}
+.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── FOOTER ── */
+.footer{padding:6px 16px;background:var(--bg2);border-top:1px solid var(--border);display:flex;align-items:center;gap:16px;font-size:.65rem;color:var(--text-dim);font-family:'JetBrains Mono',monospace;position:sticky;bottom:0}
+.footer .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.footer .dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.footer .dot.err{background:var(--red);box-shadow:0 0 6px var(--red)}
+
+/* responsive */
+@media(max-width:900px){
+  .grid{grid-template-columns:1fr}
+  .panel{border-right:none;border-bottom:1px solid var(--border)}
+}
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="brand">NSE<span>SCAN</span></div>
+  <div class="market-badge closed" id="marketBadge">CLOSED</div>
+  <div class="clock" id="clock">--:--:--</div>
+  <div class="spacer"></div>
+  <div class="last-updated" id="lastUpdated">—</div>
+</div>
+
+<!-- PROGRESS -->
+<div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+
+<!-- CONTROLS -->
+<div class="controls">
+  <label>Index</label>
+  <select id="indexSelect">
+    <option value="NIFTY 50">NIFTY 50</option>
+    <option value="NIFTY BANK">NIFTY BANK</option>
+    <option value="NIFTY IT">NIFTY IT</option>
+    <option value="NIFTY AUTO">NIFTY AUTO</option>
+    <option value="NIFTY PHARMA">NIFTY PHARMA</option>
+    <option value="NIFTY MIDCAP 50">NIFTY MIDCAP 50</option>
+  </select>
+  <button class="btn" id="refreshBtn">↻ Refresh</button>
+  <span class="countdown" id="countdown">30s</span>
+</div>
+
+<!-- DATA GRID -->
+<div class="grid">
+  <!-- GAINERS -->
+  <div class="panel gainers">
+    <div class="panel-header">
+      <h2>▲ TOP GAINERS</h2>
+      <span class="count" id="gainerCount">0</span>
+    </div>
+    <div id="gainerBody">
+      <div class="status-msg"><div class="spinner"></div>Loading…</div>
+    </div>
+  </div>
+  <!-- LOSERS -->
+  <div class="panel losers">
+    <div class="panel-header">
+      <h2>▼ TOP LOSERS</h2>
+      <span class="count" id="loserCount">0</span>
+    </div>
+    <div id="loserBody">
+      <div class="status-msg"><div class="spinner"></div>Loading…</div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <span class="dot ok" id="connDot"></span>
+  <span id="connLabel">CONNECTED</span>
+  <div class="spacer"></div>
+  <span>DATA SOURCE: NSE INDIA</span>
+</div>
+
+<script>
+const REFRESH_INTERVAL = 30; // seconds
+let timer = REFRESH_INTERVAL;
+let intervalId = null;
+let previousData = {};
+
+const $ = id => document.getElementById(id);
+
+// ── IST Clock & Market Status ──
+function updateClock() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const h = ist.getHours(), m = ist.getMinutes(), s = ist.getSeconds();
+  const day = ist.getDay();
+  const pad = n => String(n).padStart(2, "0");
+  $("clock").textContent = `IST ${pad(h)}:${pad(m)}:${pad(s)}`;
+
+  const mins = h * 60 + m;
+  const isWeekday = day >= 1 && day <= 5;
+  const isOpen = isWeekday && mins >= 555 && mins <= 930; // 9:15 - 15:30
+  const badge = $("marketBadge");
+  if (isOpen) {
+    badge.textContent = "LIVE";
+    badge.className = "market-badge open";
+  } else {
+    badge.textContent = "CLOSED";
+    badge.className = "market-badge closed";
+  }
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Format helpers ──
+function fmtNum(n, decimals = 2) {
+  if (n == null || isNaN(n)) return "—";
+  return Number(n).toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function fmtVol(n) {
+  if (n == null || isNaN(n)) return "—";
+  if (n >= 1e7) return (n / 1e7).toFixed(2) + " Cr";
+  if (n >= 1e5) return (n / 1e5).toFixed(2) + " L";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + " K";
+  return String(n);
+}
+
+// ── Build table HTML ──
+function buildTable(items, type, maxVol) {
+  let html = `<table><thead><tr>
+    <th>#</th><th>Symbol</th><th>LTP ₹</th><th>Chg %</th><th>Chg ₹</th><th>Volume</th>
+  </tr></thead><tbody>`;
+
+  items.forEach((s, i) => {
+    const key = `${type}-${s.symbol}`;
+    const prev = previousData[key];
+    let flashClass = "";
+    if (prev && prev.lastPrice !== s.lastPrice) {
+      flashClass = type === "gainer" ? "flash-gain" : "flash-lose";
+    }
+    previousData[key] = { lastPrice: s.lastPrice };
+
+    const volPct = maxVol > 0 ? ((s.totalTradedVolume || 0) / maxVol * 100) : 0;
+    const barColor = type === "gainer" ? "var(--green)" : "var(--red)";
+
+    html += `<tr class="${flashClass}">
+      <td>${i + 1}</td>
+      <td>${s.symbol}</td>
+      <td>${fmtNum(s.lastPrice)}</td>
+      <td>${s.pChange > 0 ? "+" : ""}${fmtNum(s.pChange)}%</td>
+      <td>${s.change > 0 ? "+" : ""}${fmtNum(s.change)}</td>
+      <td class="vol-cell"><div class="vol-bar" style="width:${volPct}%;background:${barColor}"></div>${fmtVol(s.totalTradedVolume)}</td>
+    </tr>`;
+  });
+
+  html += "</tbody></table>";
+  return html;
+}
+
+// ── Fetch data ──
+async function fetchData() {
+  const index = $("indexSelect").value;
+  const dot = $("connDot");
+  const label = $("connLabel");
+
+  try {
+    const res = await fetch(`/api/gainers-losers?index=${encodeURIComponent(index)}`);
+    const json = await res.json();
+
+    if (json.error) throw new Error(json.error);
+    if (!json.data || !json.data.length) throw new Error("No data received");
+
+    // Show stale indicator if data is from cache
+    if (json._stale) {
+      $("lastUpdated").textContent += " (cached)";
+    }
+
+    // Filter out the index summary row
+    const stocks = json.data.filter(d => d.symbol !== index && d.pChange != null);
+
+    // Sort for gainers (desc) and losers (asc)
+    const sorted = [...stocks].sort((a, b) => b.pChange - a.pChange);
+    const gainers = sorted.filter(s => s.pChange >= 0).slice(0, 10);
+    const losers = [...stocks].sort((a, b) => a.pChange - b.pChange).filter(s => s.pChange < 0).slice(0, 10);
+
+    const allVols = stocks.map(s => s.totalTradedVolume || 0);
+    const maxVol = Math.max(...allVols, 1);
+
+    $("gainerBody").innerHTML = gainers.length
+      ? buildTable(gainers, "gainer", maxVol)
+      : '<div class="status-msg">No gainers</div>';
+    $("loserBody").innerHTML = losers.length
+      ? buildTable(losers, "loser", maxVol)
+      : '<div class="status-msg">No losers</div>';
+
+    $("gainerCount").textContent = gainers.length;
+    $("loserCount").textContent = losers.length;
+
+    const now = new Date();
+    $("lastUpdated").textContent = `Updated ${now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })}`;
+
+    dot.className = "dot ok";
+    label.textContent = "CONNECTED";
+  } catch (err) {
+    console.error(err);
+    // Only replace tables if we have no prior data showing
+    const gainerTable = $("gainerBody").querySelector("table");
+    const loserTable = $("loserBody").querySelector("table");
+    if (!gainerTable) {
+      $("gainerBody").innerHTML = `<div class="status-msg error">${err.message} — retrying…</div>`;
+    }
+    if (!loserTable) {
+      $("loserBody").innerHTML = `<div class="status-msg error">${err.message} — retrying…</div>`;
+    }
+    dot.className = "dot err";
+    label.textContent = "RETRYING";
+    // Auto-retry after 5 seconds instead of waiting full cycle
+    setTimeout(fetchData, 5000);
+  }
+}
+
+// ── Timer / progress bar ──
+function resetTimer() {
+  timer = REFRESH_INTERVAL;
+  $("progressBar").style.width = "100%";
+}
+
+function tick() {
+  timer--;
+  if (timer <= 0) {
+    fetchData();
+    resetTimer();
+  }
+  const pct = (timer / REFRESH_INTERVAL) * 100;
+  $("progressBar").style.width = pct + "%";
+  $("countdown").textContent = timer + "s";
+}
+
+// ── Init ──
+function start() {
+  fetchData();
+  resetTimer();
+  if (intervalId) clearInterval(intervalId);
+  intervalId = setInterval(tick, 1000);
+}
+
+$("refreshBtn").addEventListener("click", () => {
+  fetchData();
+  resetTimer();
+});
+
+$("indexSelect").addEventListener("change", () => {
+  previousData = {};
+  start();
+});
+
+start();
+</script>
+</body>
+</html>
